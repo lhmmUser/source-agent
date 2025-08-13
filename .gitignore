@@ -1,0 +1,12 @@
+# envs
+.env
+*.env
+backend/.env
+
+# caches/artifacts
+__pycache__/
+*.pyc
+backend/vector_store/
+backend/uploads/
+*.bin
+*.sqlite3
