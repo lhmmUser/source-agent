@@ -1,4 +1,5 @@
-# app/routers/ingest.py
+import os
+import shutil
 from fastapi import APIRouter, UploadFile, File, Depends, HTTPException
 from sqlalchemy.orm import Session
 from app.db import get_db
@@ -8,17 +9,17 @@ from app.services.chunking import chunk_text
 from app.config import get_settings
 import fitz  # PyMuPDF
 
+UPLOAD_DIR = "uploads"   # relative path, or use absolute if preferred
+os.makedirs(UPLOAD_DIR, exist_ok=True)
+
 router = APIRouter(prefix="/ingest", tags=["ingest"])
 
 
-def extract_pdf_texts(file: UploadFile):
+def extract_pdf_texts(file_path: str):
     """Extract plain text per page using PyMuPDF."""
-    print(f"[ingest.py] Starting PDF extraction: {file.filename}")
+    print(f"[ingest.py] Starting PDF extraction: {file_path}")
 
-    pdf_bytes = file.file.read()
-    print(f"[ingest.py] Loaded {len(pdf_bytes)} bytes from file")
-
-    doc = fitz.open(stream=pdf_bytes, filetype="pdf")
+    doc = fitz.open(file_path)
     print(f"[ingest.py] Opened PDF with {doc.page_count} pages")
 
     extracted = []
@@ -39,7 +40,14 @@ def ingest_pdf(file: UploadFile = File(...), db: Session = Depends(get_db)):
         print(f"[ingest.py] ERROR: Unsupported file type: {file.filename}")
         raise HTTPException(400, "Only PDF supported")
 
-    extracted = extract_pdf_texts(file)
+    # --- Save file to uploads/ ---
+    save_path = os.path.join(UPLOAD_DIR, file.filename)
+    with open(save_path, "wb") as buffer:
+        shutil.copyfileobj(file.file, buffer)
+    print(f"[ingest.py] Saved PDF to {save_path}")
+
+    # --- Extract text from saved file ---
+    extracted = extract_pdf_texts(save_path)
 
     # --- Create Document row ---
     doc = Document(source=file.filename, meta=None)
@@ -107,4 +115,4 @@ def ingest_pdf(file: UploadFile = File(...), db: Session = Depends(get_db)):
     db.commit()
     print(f"[ingest.py] Ingestion complete: {len(chunks_to_add)} chunks committed for doc_id={doc.id}")
 
-    return {"document_id": doc.id, "chunks": len(chunks_to_add)}
+    return {"document_id": doc.id, "chunks": len(chunks_to_add), "file_path": save_path}
