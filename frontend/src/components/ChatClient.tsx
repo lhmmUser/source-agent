@@ -1,8 +1,22 @@
 'use client'
 import { useEffect, useRef, useState } from 'react'
 import MessageBubble from './MessageBubble'
+import AssistantBubbleWithSources from './AssistantBubbleWithSources';
 
-type Msg = { role: 'user' | 'assistant', content: string }
+
+type Citation = {
+  title: string
+  pdf_url: string
+  page: number
+  snippet?: string
+}
+
+type Msg = {
+  role: 'user' | 'assistant'
+  content: string
+  citations?: Citation[] // ✅ optional
+}
+
 
 export default function ChatClient() {
   const [messages, setMessages] = useState<Msg[]>([])
@@ -29,35 +43,92 @@ export default function ChatClient() {
       return
     }
 
-    const reader = resp.body.getReader()
-    const decoder = new TextDecoder()
-    let assistantText = ''
+    const reader = resp.body.getReader();
+const decoder = new TextDecoder();
+let assistantText = '';
+let buffer = ''; // accumulate partial lines across chunks
+let finished = false;
 
-    while (true) {
-      const { value, done } = await reader.read()
-      if (done) break
-      const chunk = decoder.decode(value, { stream: true })
-      // SSE frames: lines like "data: token"
-      const lines = chunk.split('\n')
-      for (const line of lines) {
-        if (!line.startsWith('data: ')) continue
-        const token = line.slice(6)
-        assistantText += token
-        setMessages(m => {
-          const copy = [...m]
-          copy[copy.length - 1] = { role: 'assistant', content: assistantText }
-          return copy
-        })
+try {
+  while (true) {
+    const { value, done } = await reader.read();
+    if (done) break;
+
+    buffer += decoder.decode(value, { stream: true });
+
+    // Process complete lines; keep any trailing partial line in buffer
+    let lineEnd;
+    while ((lineEnd = buffer.indexOf('\n')) >= 0) {
+      const rawLine = buffer.slice(0, lineEnd);
+      buffer = buffer.slice(lineEnd + 1);
+
+      const line = rawLine.trim();
+      if (!line || !line.startsWith('data:')) continue;
+
+      const payload = line.slice(5).trim(); // after "data:"
+
+      // 1) Stop on DONE (don't append it to chat)
+      if (payload === '[DONE]') {
+        finished = true;
+        break;
       }
+
+      // 2) Try parse final JSON frame
+      let parsed: any = null;
+      if (payload.startsWith('{') || payload.startsWith('[')) {
+        try {
+          parsed = JSON.parse(payload);
+        } catch {
+          // not JSON; fall through
+        }
+      }
+
+      if (parsed && parsed.type === 'final') {
+        setMessages(m => {
+          const copy = [...m];
+          copy[copy.length - 1] = {
+            role: 'assistant',
+            content: parsed.answer ?? '',
+            citations: parsed.citations ?? [],
+          };
+          return copy;
+        });
+        // do NOT also append as plain text
+        continue;
+      }
+
+      // 3) Plain token (streaming text)
+      assistantText += payload;
+      setMessages(m => {
+        const copy = [...m];
+        copy[copy.length - 1] = { role: 'assistant', content: assistantText };
+        return copy;
+      });
     }
 
-    setLoading(false)
+    if (finished) break;
   }
+} finally {
+  setLoading(false);
+}
 
+  }
   return (
     <div>
       <h1>Knowledge Chatbot</h1>
-      {messages.map((msg, i) => <MessageBubble key={i} role={msg.role} content={msg.content} />)}
+      {messages.map((msg, i) => {
+  if (msg.role === 'assistant') {
+    return (
+      <AssistantBubbleWithSources
+        key={i}
+        content={msg.content}
+        citations={msg.citations}
+      />
+    );
+  }
+  return <MessageBubble key={i} role={msg.role} content={msg.content} />;
+})}
+
       <div style={{ display: 'flex', gap: 8, marginTop: 12 }}>
         <input
           value={input}

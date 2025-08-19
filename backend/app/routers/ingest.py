@@ -1,26 +1,110 @@
 # app/routers/ingest.py
-from fastapi import APIRouter, UploadFile, File, HTTPException
-from PyPDF2 import PdfReader
+from fastapi import APIRouter, UploadFile, File, Depends, HTTPException
+from sqlalchemy.orm import Session
+from app.db import get_db
+from app.models import Document, Chunk
+from app.services.llm import embed_texts
 from app.services.chunking import chunk_text
-from app.services.vector_store import add_texts
+from app.config import get_settings
+import fitz  # PyMuPDF
 
-router = APIRouter()
+router = APIRouter(prefix="/ingest", tags=["ingest"])
 
-@router.post("/ingest/file")
-async def ingest_file(file: UploadFile = File(...)):
-    if not file.filename.endswith(".pdf"):
-        raise HTTPException(status_code=400, detail="Only PDF files supported.")
 
-    reader = PdfReader(file.file)
-    raw_text = ""
-    for page in reader.pages:
-        raw_text += page.extract_text() or ""
+def extract_pdf_texts(file: UploadFile):
+    """Extract plain text per page using PyMuPDF."""
+    print(f"[ingest.py] Starting PDF extraction: {file.filename}")
 
-    if not raw_text.strip():
-        raise HTTPException(status_code=400, detail="No extractable text found in PDF.")
+    pdf_bytes = file.file.read()
+    print(f"[ingest.py] Loaded {len(pdf_bytes)} bytes from file")
 
-    chunks = chunk_text(raw_text)
-    metadatas = [{"source": file.filename, "page": i} for i, _ in enumerate(chunks, start=1)]
-    add_texts(chunks, metadatas)
+    doc = fitz.open(stream=pdf_bytes, filetype="pdf")
+    print(f"[ingest.py] Opened PDF with {doc.page_count} pages")
 
-    return {"status": "success", "chunks_added": len(chunks)}
+    extracted = []
+    for i, page in enumerate(doc, start=1):
+        text = page.get_text("text")
+        print(f"[ingest.py] Extracted page {i}, {len(text)} chars")
+        extracted.append({"page": i, "text": text, "section_title": ""})
+
+    print(f"[ingest.py] Extraction complete, total pages={len(extracted)}")
+    return extracted
+
+
+@router.post("/pdf")
+def ingest_pdf(file: UploadFile = File(...), db: Session = Depends(get_db)):
+    print(f"[ingest.py] Ingest request received for: {file.filename}")
+
+    if not file.filename.lower().endswith(".pdf"):
+        print(f"[ingest.py] ERROR: Unsupported file type: {file.filename}")
+        raise HTTPException(400, "Only PDF supported")
+
+    extracted = extract_pdf_texts(file)
+
+    # --- Create Document row ---
+    doc = Document(source=file.filename, meta=None)
+    db.add(doc)
+    db.flush()
+    print(f"[ingest.py] Created Document entry with ID={doc.id}")
+
+    # --- Chunk + embed ---
+    settings = get_settings()
+    chunks_to_add = []
+    batch_texts, batch_meta = [], []
+    ordinal = 0
+
+    for page_item in extracted:
+        page = page_item["page"]
+        text = page_item["text"] or ""
+        sect = page_item.get("section_title", "")
+
+        for ch in chunk_text(text, is_markdown=False):
+            body = ch["text"]
+            if not body.strip():
+                continue
+            batch_texts.append(body)
+            batch_meta.append((page, ch.get("section_title") or sect, ordinal))
+            ordinal += 1
+
+            if len(batch_texts) >= 64:
+                print(f"[ingest.py] Embedding batch of {len(batch_texts)} chunks")
+                vecs = embed_texts(batch_texts)
+                print(f"[ingest.py] Got {len(vecs)} embeddings")
+
+                for (page_no, section, ordno), emb, body_text in zip(batch_meta, vecs, batch_texts):
+                    chunks_to_add.append(Chunk(
+                        document_id=doc.id,
+                        ordinal=ordno,
+                        text=body_text,
+                        embedding=emb,
+                        page=page_no,
+                        section_title=section,
+                        source=file.filename,
+                    ))
+                print(f"[ingest.py] Added {len(batch_meta)} chunks to queue")
+
+                batch_texts.clear()
+                batch_meta.clear()
+
+    # --- Final flush ---
+    if batch_texts:
+        print(f"[ingest.py] Final batch embedding {len(batch_texts)} chunks")
+        vecs = embed_texts(batch_texts)
+        for (page_no, section, ordno), emb, body_text in zip(batch_meta, vecs, batch_texts):
+            chunks_to_add.append(Chunk(
+                document_id=doc.id,
+                ordinal=ordno,
+                text=body_text,
+                embedding=emb,
+                page=page_no,
+                section_title=section,
+                source=file.filename,
+            ))
+        print(f"[ingest.py] Added final {len(batch_texts)} chunks to queue")
+
+    # --- Save to DB ---
+    db.add_all(chunks_to_add)
+    db.commit()
+    print(f"[ingest.py] Ingestion complete: {len(chunks_to_add)} chunks committed for doc_id={doc.id}")
+
+    return {"document_id": doc.id, "chunks": len(chunks_to_add)}
