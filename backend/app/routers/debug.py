@@ -23,14 +23,12 @@ def db_info():
 
 
 @router.get("/documents")
-def list_documents(limit: int = 5, db: Session = Depends(get_db)):
-    """Peek into the documents table."""
-    docs = db.execute(select(Document).limit(limit)).scalars().all()
-    return [
-        {"id": d.id, "source": d.source, "meta": d.meta, "created_at": d.created_at}
-        for d in docs
-    ]
-
+def all_documents(limit: int = 1000, db: Session = Depends(get_db)):
+    """Return recent documents for admin UI."""
+    docs = db.execute(
+        select(Document).order_by(Document.created_at.desc()).limit(limit)
+    ).scalars().all()
+    return [{"id": d.id, "source": d.source, "created_at": d.created_at} for d in docs]
 
 @router.get("/chunks")
 def list_chunks(limit: int = 5, db: Session = Depends(get_db)):
@@ -62,3 +60,4 @@ def debug_query(q: str = Query(...), n: int = 5, db: Session = Depends(get_db)):
     if not results:
         raise HTTPException(status_code=404, detail="No results")
     return {"query": q, "results": results}
+

@@ -7,6 +7,7 @@ from app.db import get_db
 from app.services.vector_store import search_chunks
 from app.services.llm import call_llm_stream
 from app.config import get_settings
+from app.utils.prompt_store import load_prompt_template
 
 import json
 
@@ -31,16 +32,8 @@ def chat(payload: ChatRequest, db: Session = Depends(get_db)):
     context = "\n\n".join(
         f"[{i+1}] {r['text']}" for i, r in enumerate(results)
     )
-
-    prompt = f"""You are a document-grounded assistant. 
-Use ONLY the provided context. 
-If the context is missing or irrelevant, say: "I don't know based on the provided document."
-
-Context:
-{context}
-
-Question: {q}
-"""
+    template = load_prompt_template()
+    prompt = template.format(context=context, question=q)
 
     def event_stream():
         collected = []  # store chunks for final answer

@@ -5,6 +5,8 @@ from fastapi.staticfiles import StaticFiles
 
 from app.routers import ingest, chat
 from app.routers import debug as debug_router
+from app.routers import prompt as prompt_router
+
 from app.db import ensure_extensions, engine, Base
 
 app = FastAPI(title="LLM Agent Backend")
@@ -22,6 +24,7 @@ app.add_middleware(
 app.include_router(ingest.router)
 app.include_router(chat.router)
 app.include_router(debug_router.router)
+app.include_router(prompt_router.router)
 
 # Static file serving
 app.mount("/uploads", StaticFiles(directory="uploads"), name="uploads")

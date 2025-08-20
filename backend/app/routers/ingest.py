@@ -8,6 +8,7 @@ from app.services.llm import embed_texts
 from app.services.chunking import chunk_text
 from app.config import get_settings
 import fitz  # PyMuPDF
+from sqlalchemy import select
 
 UPLOAD_DIR = "uploads"   # relative path, or use absolute if preferred
 os.makedirs(UPLOAD_DIR, exist_ok=True)
@@ -116,3 +117,37 @@ def ingest_pdf(file: UploadFile = File(...), db: Session = Depends(get_db)):
     print(f"[ingest.py] Ingestion complete: {len(chunks_to_add)} chunks committed for doc_id={doc.id}")
 
     return {"document_id": doc.id, "chunks": len(chunks_to_add), "file_path": save_path}
+
+@router.get("/documents")
+def all_documents(limit: int = 1000, db: Session = Depends(get_db)):
+    """Return recent documents for admin UI."""
+    docs = db.execute(
+        select(Document).order_by(Document.created_at.desc()).limit(limit)
+    ).scalars().all()
+    return [{"id": d.id, "source": d.source, "created_at": d.created_at} for d in docs]
+
+# --- delete a document (rows + file) ---
+@router.delete("/document/{doc_id}")
+def delete_document(doc_id: int, db: Session = Depends(get_db)):
+    """Delete a document, its chunks, and the saved PDF."""
+    doc = db.get(Document, doc_id)
+    if not doc:
+        raise HTTPException(status_code=404, detail="Document not found")
+
+    # Delete chunks first
+    db.query(Chunk).filter(Chunk.document_id == doc_id).delete(synchronize_session=False)
+
+    # Remove the saved file (if present)
+    try:
+        if doc.source:
+            path = os.path.join(UPLOAD_DIR, doc.source)
+            if os.path.exists(path):
+                os.remove(path)
+    except Exception as e:
+        # Non-fatal: log and continue
+        print(f"[ingest.py] WARN: Failed to remove file for doc_id={doc_id}: {e}")
+
+    # Delete the document row
+    db.delete(doc)
+    db.commit()
+    return {"status": "ok", "deleted_id": doc_id}
