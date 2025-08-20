@@ -2,8 +2,19 @@
 "use client";
 
 import { useSearchParams } from "next/navigation";
-import PDFViewerModal from "@/components/pdf/PDFViewerModal";
 import { useMemo, useState } from "react";
+import dynamic from "next/dynamic";
+
+// ⬇️ key change: client-only import to avoid DOM APIs on the server
+const PDFViewerModal = dynamic(
+  () => import("@/components/pdf/PDFViewerModal"),
+  {
+    ssr: false,
+    loading: () => (
+      <div className="p-6 text-sm">Loading PDF viewer…</div>
+    ),
+  }
+);
 
 export default function ViewerPage() {
   const sp = useSearchParams();
